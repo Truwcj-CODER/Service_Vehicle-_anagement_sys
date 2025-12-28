@@ -8,6 +8,21 @@ import time
 import serial
 import threading
 import numpy as np
+import re
+
+# Thử import PaddleOCR (nếu có) - ƯU TIÊN CAO NHẤT
+try:
+    from paddleocr import PaddleOCR
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PADDLEOCR_AVAILABLE = False
+
+# Thử import EasyOCR (nếu có)
+try:
+    import easyocr
+    EASYOCR_AVAILABLE = True
+except ImportError:
+    EASYOCR_AVAILABLE = False
 
 # ========== CẤU HÌNH ==========
 # Thay đổi IP này thành IP của server của bạn
@@ -154,6 +169,178 @@ def upload_image_to_imgbb(image_data):
         print(f"❌ Lỗi upload ImgBB: {e}")
         return None
 
+# ========== OCR FUNCTIONS ==========
+
+def is_vietnam_license_plate(text):
+    """
+    Kiểm tra xem text có phải biển số Việt Nam không
+    Format: XX-XXXXX hoặc XXX-XXXXX (có thể có dấu chấm, khoảng trắng)
+    Ví dụ: 60C-55555, 30A-12345, 60C 555.55, T61 679.60
+    """
+    text_upper = text.upper().strip()
+    text_clean = re.sub(r'[\s\.\-]', '', text_upper)
+    
+    if len(text_clean) < 6 or len(text_clean) > 10:
+        return False
+    
+    has_letter = any(c.isalpha() for c in text_clean)
+    has_digit = any(c.isdigit() for c in text_clean)
+    
+    if not (has_letter and has_digit):
+        return False
+    
+    pattern1 = re.match(r'^[A-Z]?\d{2,3}[A-Z]{0,2}\d{4,6}$', text_clean)
+    pattern2 = re.match(r'^[A-Z]{2,3}\d{4,7}$', text_clean)
+    
+    parts = re.split(r'[\s\.\-]+', text_upper)
+    if len(parts) == 2:
+        part1 = re.sub(r'[\s\.\-]', '', parts[0].strip())
+        part2 = re.sub(r'[\s\.\-]', '', parts[1].strip())
+        part1_match = (re.match(r'^[A-Z]?\d{2,3}[A-Z]{0,2}$', part1) or 
+                       re.match(r'^\d{2,3}[A-Z]{1,2}$', part1))
+        part2_match = re.match(r'^\d{3,6}$', part2)
+        if part1_match and part2_match:
+            return True
+    
+    if re.match(r'^[A-Z]\d{2,3}\d{4,6}$', text_clean):
+        return True
+    
+    return bool(pattern1 or pattern2)
+
+def detect_license_plate_with_paddleocr(img):
+    """
+    Nhận dạng biển số bằng PaddleOCR (VIP - ưu tiên cao nhất)
+    """
+    if not PADDLEOCR_AVAILABLE:
+        return None
+    
+    try:
+        ocr = PaddleOCR(use_textline_orientation=True, lang='vi')
+        predict_result = ocr.predict(img)
+        
+        if isinstance(predict_result, list) and len(predict_result) > 0:
+            result_obj = predict_result[0]
+        else:
+            result_obj = predict_result
+        
+        if hasattr(result_obj, 'rec_texts'):
+            rec_texts = result_obj.rec_texts
+            rec_scores = result_obj.rec_scores
+            rec_polys = result_obj.rec_polys
+        elif isinstance(result_obj, dict):
+            rec_texts = result_obj.get('rec_texts', [])
+            rec_scores = result_obj.get('rec_scores', [])
+            rec_polys = result_obj.get('rec_polys', [])
+        else:
+            return None
+        
+        # Tìm biển số
+        license_plate_candidates = []
+        h, w = img.shape[:2]
+        
+        for poly, text, score in zip(rec_polys, rec_texts, rec_scores):
+            text_clean = text.strip().upper()
+            if len(text_clean) < 3 or len(text_clean) > 20:
+                continue
+            if text_clean.isalpha() and len(text_clean) > 5:
+                continue
+            if is_vietnam_license_plate(text_clean):
+                y_center = sum(pt[1] for pt in poly) / len(poly)
+                position_score = 1.0 if y_center > h * 0.5 else 0.5
+                license_plate_candidates.append({
+                    'text': text_clean,
+                    'confidence': score,
+                    'total_score': score * position_score
+                })
+        
+        if license_plate_candidates:
+            best = max(license_plate_candidates, key=lambda x: x['total_score'])
+            return best['text']
+        
+        # Thử ghép text
+        plate_prefixes = []
+        plate_suffixes = []
+        for poly, text, score in zip(rec_polys, rec_texts, rec_scores):
+            text_clean = text.strip().upper()
+            if re.match(r'^[A-Z]?\d{2,3}[A-Z]{0,2}$', text_clean) or re.match(r'^\d{2,3}[A-Z]{1,2}$', text_clean):
+                y_center = sum(pt[1] for pt in poly) / len(poly)
+                plate_prefixes.append((text_clean, y_center))
+            elif re.match(r'^\d{3,6}(\.\d{1,2})?$', text_clean):
+                y_center = sum(pt[1] for pt in poly) / len(poly)
+                plate_suffixes.append((text_clean, y_center))
+        
+        for text1, y1 in plate_prefixes:
+            for text2, y2 in plate_suffixes:
+                if abs(y1 - y2) < 50:
+                    combined = f"{text1} {text2}".upper().strip()
+                    if is_vietnam_license_plate(combined):
+                        return combined
+        
+        return None
+    except Exception as e:
+        print(f"⚠️  Lỗi PaddleOCR: {e}")
+        return None
+
+def detect_license_plate_with_easyocr(img):
+    """
+    Nhận dạng biển số bằng EasyOCR (fallback)
+    """
+    if not EASYOCR_AVAILABLE:
+        return None
+    
+    try:
+        reader = easyocr.Reader(['en', 'vi'], gpu=False)
+        results = reader.readtext(img)
+        
+        if not results:
+            return None
+        
+        license_plate_candidates = []
+        h, w = img.shape[:2]
+        
+        for (bbox, text, confidence) in results:
+            text_clean = text.strip().upper()
+            if len(text_clean) < 3 or len(text_clean) > 20:
+                continue
+            if text_clean.isalpha() and len(text_clean) > 5:
+                continue
+            if is_vietnam_license_plate(text_clean):
+                y_center = sum(pt[1] for pt in bbox) / len(bbox)
+                position_score = 1.0 if y_center > h * 0.5 else 0.5
+                license_plate_candidates.append({
+                    'text': text_clean,
+                    'confidence': confidence,
+                    'total_score': confidence * position_score
+                })
+        
+        if license_plate_candidates:
+            best = max(license_plate_candidates, key=lambda x: x['total_score'])
+            return best['text']
+        
+        # Thử ghép text
+        plate_prefixes = []
+        plate_suffixes = []
+        for (bbox, text, conf) in results:
+            text_clean = text.strip().upper()
+            if re.match(r'^[A-Z]?\d{2,3}[A-Z]{0,2}$', text_clean) or re.match(r'^\d{2,3}[A-Z]{1,2}$', text_clean):
+                y_center = sum(pt[1] for pt in bbox) / len(bbox)
+                plate_prefixes.append((text_clean, y_center))
+            elif re.match(r'^\d{3,6}(\.\d{1,2})?$', text_clean):
+                y_center = sum(pt[1] for pt in bbox) / len(bbox)
+                plate_suffixes.append((text_clean, y_center))
+        
+        for text1, y1 in plate_prefixes:
+            for text2, y2 in plate_suffixes:
+                if abs(y1 - y2) < 50:
+                    combined = f"{text1} {text2}".upper().strip()
+                    if is_vietnam_license_plate(combined):
+                        return combined
+        
+        return None
+    except Exception as e:
+        print(f"⚠️  Lỗi EasyOCR: {e}")
+        return None
+
 # ========== DTK LPR SDK INTEGRATION ==========
 
 def init_dtk_lpr():
@@ -173,21 +360,31 @@ def init_dtk_lpr():
     
     try:
         # Import DTK LPR SDK (cần cài đặt trước)
-        # from dtklpr import LPREngine, LPRParams, VideoCapture, VideoFrame
+        # Tên module có thể khác tùy vào cách cài đặt (dtklpr, DTKLPR, etc.)
+        try:
+            from dtklpr import LPREngine, LPRParams
+        except ImportError:
+            try:
+                from DTKLPR import LPREngine, LPRParams
+            except ImportError:
+                raise ImportError("Không tìm thấy module DTK LPR SDK")
         
-        # Tạo LPR Parameters
-        # params = LPRParams()
-        # params.Countries = DTK_LPR_COUNTRIES
-        # params.MinPlateWidth = DTK_LPR_MIN_PLATE_WIDTH
-        # params.MaxPlateWidth = DTK_LPR_MAX_PLATE_WIDTH
+        # Tạo LPR Parameters (tương tự như C#)
+        params = LPRParams()
+        params.Countries = DTK_LPR_COUNTRIES
+        params.MinPlateWidth = DTK_LPR_MIN_PLATE_WIDTH
+        params.MaxPlateWidth = DTK_LPR_MAX_PLATE_WIDTH
         
-        # Khởi tạo engine với callback
-        # lpr_engine = LPREngine(params, True, on_license_plate_detected)
+        # Khởi tạo engine với callback (True = enable callback, on_license_plate_detected)
+        lpr_engine = LPREngine(params, True, on_license_plate_detected)
         
         print("✅ DTK LPR Engine đã được khởi tạo")
+        print(f"   Countries: {DTK_LPR_COUNTRIES}")
+        print(f"   Plate width: {DTK_LPR_MIN_PLATE_WIDTH}-{DTK_LPR_MAX_PLATE_WIDTH}px")
         return True
-    except ImportError:
+    except ImportError as e:
         print("❌ Không tìm thấy DTK LPR SDK Python bindings")
+        print(f"   Lỗi: {e}")
         print("   Vui lòng cài đặt theo hướng dẫn từ: https://www.dtksoft.com/lprsdk")
         return False
     except Exception as e:
@@ -223,51 +420,88 @@ def on_license_plate_detected(engine, plate):
     scan_trigger = False
     plate.Dispose()
 
-def detect_license_plate_from_image(image_data):
+def detect_license_plate_from_image(image_data, image_path=None):
     """
-    Nhận dạng biển số từ ảnh tĩnh sử dụng DTK LPR SDK
-    """
-    if not DTK_LPR_ENABLED or lpr_engine is None:
-        print("⚠️  DTK LPR SDK chưa được khởi tạo, dùng placeholder")
-        return "51A-TEST01"
+    Nhận dạng biển số từ ảnh tĩnh
+    Thứ tự ưu tiên: PaddleOCR → EasyOCR → DTK LPR SDK
     
+    Args:
+        image_data: bytes của ảnh (JPEG/PNG)
+        image_path: (optional) đường dẫn file ảnh
+    
+    Returns:
+        str: Biển số đã nhận dạng, hoặc None nếu không tìm thấy
+    """
+    # Chuyển đổi image_data thành numpy array
     try:
-        # Chuyển đổi image_data (bytes) thành numpy array
         nparr = np.frombuffer(image_data, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
         if img is None:
             print("❌ Không thể decode ảnh")
             return None
-        
-        # Sử dụng DTK LPR để đọc từ file/ảnh
-        # plates = lpr_engine.ReadFromFile(image_path)  # Nếu có file
-        # Hoặc:
-        # plates = lpr_engine.ReadFromImage(img)  # Nếu có numpy array
-        
-        # Tạm thời return None vì cần API chính xác từ DTK SDK
-        # plates = lpr_engine.ReadFromImage(img)
-        # if plates and len(plates) > 0:
-        #     return plates[0].Text
-        
-        print("⚠️  Cần cài đặt DTK LPR SDK để sử dụng tính năng này")
-        return None
-        
     except Exception as e:
-        print(f"❌ Lỗi nhận dạng biển số: {e}")
+        print(f"❌ Lỗi decode ảnh: {e}")
         return None
+    
+    # ƯU TIÊN 1: PaddleOCR (VIP)
+    if PADDLEOCR_AVAILABLE:
+        print("🔍 [ƯU TIÊN 1] Thử nhận dạng bằng PaddleOCR (VIP)...")
+        result = detect_license_plate_with_paddleocr(img)
+        if result:
+            print(f"✅ PaddleOCR tìm thấy biển số: {result}")
+            return result
+    
+    # ƯU TIÊN 2: EasyOCR
+    if EASYOCR_AVAILABLE:
+        print("🔍 [ƯU TIÊN 2] Thử nhận dạng bằng EasyOCR...")
+        result = detect_license_plate_with_easyocr(img)
+        if result:
+            print(f"✅ EasyOCR tìm thấy biển số: {result}")
+            return result
+    
+    # ƯU TIÊN 3: DTK LPR SDK
+    if DTK_LPR_ENABLED and lpr_engine is not None:
+        print("🔍 [ƯU TIÊN 3] Thử nhận dạng bằng DTK LPR SDK...")
+        try:
+            if image_path and os.path.exists(image_path):
+                plates = lpr_engine.ReadFromFile(image_path)
+            else:
+                import tempfile
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                    tmp_file.write(image_data)
+                    tmp_path = tmp_file.name
+                try:
+                    plates = lpr_engine.ReadFromFile(tmp_path)
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+            
+            if plates and len(plates) > 0:
+                best_plate = max(plates, key=lambda p: p.Confidence)
+                plate_text = best_plate.Text
+                print(f"✅ DTK LPR SDK tìm thấy biển số: {plate_text}")
+                for plate in plates:
+                    plate.Dispose()
+                return plate_text
+        except Exception as e:
+            print(f"⚠️  Lỗi DTK LPR SDK: {e}")
+    
+    print("⚠️  Không nhận dạng được biển số bằng bất kỳ phương pháp nào")
+    return None
 
-def detect_license_plate(image_data):
+def detect_license_plate(image_data, image_path=None):
     """
     Wrapper function - tương thích với code cũ
     """
     print("🔍 Đang nhận dạng biển số bằng DTK LPR SDK...")
-    result = detect_license_plate_from_image(image_data)
+    result = detect_license_plate_from_image(image_data, image_path)
     if result:
         return result
     else:
-        print("⚠️  Không nhận dạng được, dùng placeholder")
-        return "51A-TEST01"  # Placeholder
+        print("⚠️  Không nhận dạng được biển số")
+        return None
 
 def upload_data_file(license_plate, image_data, vehicle_weight=None, direction="IN"):
     try:

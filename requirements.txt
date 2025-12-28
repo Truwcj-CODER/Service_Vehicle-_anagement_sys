@@ -6,9 +6,33 @@ python-dotenv==1.0.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-dateutil==2.8.2
-# Raspberry Pi dependencies
+
+# ========== Raspberry Pi dependencies (BẮT BUỘC) ==========
 opencv-python>=4.5.0
 pyserial>=3.5
 requests>=2.25.0
 numpy>=1.19.0
+
+# ========== OCR dependencies (TÙY CHỌN - Cài ít nhất 1 trong 2) ==========
+# Option 1: PaddleOCR (Khuyến nghị - nhanh và chính xác)
+# pip install paddlepaddle paddleocr
+# Lưu ý: Trên Raspberry Pi 5 (ARM64), có thể cần cài từ source hoặc dùng pre-built wheel
+
+# Option 2: EasyOCR (Dễ cài hơn nhưng chậm hơn)
+# pip install easyocr
+# Lưu ý: Lần đầu chạy sẽ download model (~500MB), mất vài phút
+
+# ========== Lưu ý cho Raspberry Pi 5 ==========
+# 1. Cài đặt system dependencies trước:
+#    sudo apt-get update
+#    sudo apt-get install -y python3-pip python3-dev libopencv-dev python3-opencv
+#    sudo apt-get install -y libgl1-mesa-glx libglib2.0-0
+#
+# 2. Nếu dùng PaddleOCR trên Pi 5:
+#    - Có thể cần build từ source (mất thời gian)
+#    - Hoặc dùng EasyOCR thay thế (dễ hơn)
+#
+# 3. Kiểm tra camera:
+#    lsusb  # Xem camera có được nhận diện không
+#    v4l2-ctl --list-devices  # Xem device camera
 
