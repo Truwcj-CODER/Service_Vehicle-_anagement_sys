@@ -27,7 +27,7 @@ except ImportError:
 
 # ========== CẤU HÌNH ==========
 # Thay đổi IP này thành IP của server của bạn
-SERVER_URL = "http://192.168.101.36:5000"  
+SERVER_URL = "http://192.168.100.57:5000"  
 API_KEY = "raspberry_pi_key_123"
 DEVICE_ID = "RASPBERRY_PI_001"
 
@@ -219,6 +219,7 @@ def is_vietnam_license_plate(text):
 def detect_license_plate_with_paddleocr(img):
     """
     Nhận dạng biển số bằng PaddleOCR (VIP - ưu tiên cao nhất)
+    Version nâng cấp với logic hoàn chỉnh từ test_image.py
     """
     if not PADDLEOCR_AVAILABLE:
         return None
@@ -241,58 +242,124 @@ def detect_license_plate_with_paddleocr(img):
             rec_scores = result_obj.get('rec_scores', [])
             rec_polys = result_obj.get('rec_polys', [])
         else:
+            print("  ⚠️  Không parse được dữ liệu từ PaddleOCR")
             return None
         
-        # Tìm biển số
+        print(f"  📊 PaddleOCR phát hiện {len(rec_texts)} text(s):")
+        
+        # Lọc và tìm biển số
         license_plate_candidates = []
         h, w = img.shape[:2]
         
-        for poly, text, score in zip(rec_polys, rec_texts, rec_scores):
+        for i, (poly, text, score) in enumerate(zip(rec_polys, rec_texts, rec_scores)):
             text_clean = text.strip().upper()
-            if len(text_clean) < 3 or len(text_clean) > 20:
+            print(f"    [{i}] '{text_clean}' (score: {score:.2%})", end="")
+            
+            # Bỏ qua text quá ngắn hoặc quá dài
+            # Nhưng cho phép text 2 ký tự nếu nó là prefix/suffix (sẽ check sau)
+            if len(text_clean) == 0 or len(text_clean) > 20:
+                print(" → Loại (độ dài)")
                 continue
+            
+            # Bỏ qua text chỉ có chữ dài (như "THACO", "FORLAND")
             if text_clean.isalpha() and len(text_clean) > 5:
+                print(" → Loại (toàn chữ dài)")
                 continue
+            
+            # Kiểm tra format biển số Việt Nam
             if is_vietnam_license_plate(text_clean):
+                # Tính vị trí Y trung bình của bbox
                 y_center = sum(pt[1] for pt in poly) / len(poly)
                 position_score = 1.0 if y_center > h * 0.5 else 0.5
+                
                 license_plate_candidates.append({
                     'text': text_clean,
                     'confidence': score,
+                    'position_score': position_score,
                     'total_score': score * position_score
                 })
+                print(f" ✅ Match biển số! (score tổng: {score * position_score:.2%})")
+            else:
+                print(" → Không match format (nhưng có thể là prefix/suffix)")
         
         if license_plate_candidates:
+            # Chọn candidate có điểm cao nhất
             best = max(license_plate_candidates, key=lambda x: x['total_score'])
+            print(f"  ✅ Chọn: {best['text']}")
             return best['text']
         
-        # Thử ghép text
+        print(f"  ℹ️  Không tìm text match biển số, thử ghép...")
+        
+        # Thử ghép các text gần nhau lại
         plate_prefixes = []
         plate_suffixes = []
+        
         for poly, text, score in zip(rec_polys, rec_texts, rec_scores):
             text_clean = text.strip().upper()
-            if re.match(r'^[A-Z]?\d{2,3}[A-Z]{0,2}$', text_clean) or re.match(r'^\d{2,3}[A-Z]{1,2}$', text_clean):
+            
+            if len(text_clean) == 0:
+                continue
+            
+            # Clean text: loại bỏ dấu gạch ngang, khoảng trắng để check pattern
+            text_for_pattern = re.sub(r'[\s\-]', '', text_clean)
+            
+            # Đơn giản hóa logic:
+            # Prefix: text có chữ + có số + độ dài 2-5 (ví dụ: 62-M1, 60C, 30A, T61)
+            has_letter = any(c.isalpha() for c in text_for_pattern)
+            has_digit = any(c.isdigit() for c in text_for_pattern)
+            
+            if has_letter and has_digit and 2 <= len(text_for_pattern) <= 5:
+                # Đây là prefix
                 y_center = sum(pt[1] for pt in poly) / len(poly)
-                plate_prefixes.append((text_clean, y_center))
-            elif re.match(r'^\d{3,6}(\.\d{1,2})?$', text_clean):
+                plate_prefixes.append((poly, text_clean, score, y_center))
+                print(f"  📌 Prefix candidate: '{text_clean}' (clean: '{text_for_pattern}')")
+            # Phần sau: chỉ có số (ví dụ: 1679, 939, 939.98, 555.55)
+            elif has_digit and not has_letter and 2 <= len(text_for_pattern) <= 6:
                 y_center = sum(pt[1] for pt in poly) / len(poly)
-                plate_suffixes.append((text_clean, y_center))
+                plate_suffixes.append((poly, text_clean, score, y_center))
+                print(f"  📌 Suffix candidate: '{text_clean}' (clean: '{text_for_pattern}')")
         
-        for text1, y1 in plate_prefixes:
-            for text2, y2 in plate_suffixes:
-                if abs(y1 - y2) < 50:
+        # Thử ghép prefix và suffix gần nhau
+        print(f"  🔍 Bắt đầu ghép: {len(plate_prefixes)} prefixes × {len(plate_suffixes)} suffixes")
+        try:
+            for (poly1, text1, conf1, y1) in plate_prefixes:
+                for (poly2, text2, conf2, y2) in plate_suffixes:
                     combined = f"{text1} {text2}".upper().strip()
-                    if is_vietnam_license_plate(combined):
+                    # Clean combined text trước khi check (loại tất cả ký tự đặc biệt)
+                    combined_clean = re.sub(r'[\s\-\.\·]', '', combined)
+                    print(f"  🔄 Thử ghép: '{text1}' + '{text2}' → '{combined_clean}'")
+                    if is_vietnam_license_plate(combined_clean):
+                        print(f"  ✅ Ghép thành công: '{combined}'")
                         return combined
+                    else:
+                        print(f"     → Không match format")
+        except Exception as e:
+            print(f"  ❌ Lỗi ghép: {e}")
+            import traceback
+            traceback.print_exc()
         
+        # Nếu không ghép được, thử tất cả các cặp
+        for (poly1, text1, conf1) in [(p, t, s) for p, t, s, y in plate_prefixes]:
+            for (poly2, text2, conf2) in [(p, t, s) for p, t, s, y in plate_suffixes]:
+                combined = f"{text1} {text2}".upper().strip()
+                # Clean combined text trước khi check (loại tất cả ký tự đặc biệt)
+                combined_clean = re.sub(r'[\s\-\.\·]', '', combined)
+                if is_vietnam_license_plate(combined_clean):
+                    print(f"  ✅ Ghép (all pairs): '{text1}' + '{text2}' = '{combined}'")
+                    return combined
+        
+        print(f"  ❌ Không ghép được")
         return None
     except Exception as e:
-        print(f"⚠️  Lỗi PaddleOCR: {e}")
+        print(f"  ❌ Lỗi PaddleOCR: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def detect_license_plate_with_easyocr(img):
     """
     Nhận dạng biển số bằng EasyOCR (fallback)
+    Version nâng cấp với logic hoàn chỉnh từ test_image.py
     """
     if not EASYOCR_AVAILABLE:
         return None
@@ -302,52 +369,118 @@ def detect_license_plate_with_easyocr(img):
         results = reader.readtext(img)
         
         if not results:
+            print("  ⚠️  EasyOCR không phát hiện text nào")
             return None
         
+        print(f"  📊 EasyOCR phát hiện {len(results)} text(s):")
+        
+        # Lọc và tìm biển số
         license_plate_candidates = []
         h, w = img.shape[:2]
         
-        for (bbox, text, confidence) in results:
+        for i, (bbox, text, confidence) in enumerate(results):
             text_clean = text.strip().upper()
-            if len(text_clean) < 3 or len(text_clean) > 20:
+            print(f"    [{i}] '{text_clean}' (conf: {confidence:.2%})", end="")
+            
+            # Bỏ qua text quá ngắn hoặc quá dài
+            # Nhưng cho phép text 2 ký tự nếu nó là prefix/suffix (sẽ check sau)
+            if len(text_clean) == 0 or len(text_clean) > 20:
+                print(" → Loại (độ dài)")
                 continue
+            
+            # Bỏ qua text chỉ có chữ dài (như "THACO", "FORLAND")
             if text_clean.isalpha() and len(text_clean) > 5:
+                print(" → Loại (toàn chữ dài)")
                 continue
+            
+            # Kiểm tra format biển số Việt Nam
             if is_vietnam_license_plate(text_clean):
+                # Tính vị trí Y trung bình của bbox
                 y_center = sum(pt[1] for pt in bbox) / len(bbox)
                 position_score = 1.0 if y_center > h * 0.5 else 0.5
+                
                 license_plate_candidates.append({
                     'text': text_clean,
                     'confidence': confidence,
+                    'position_score': position_score,
                     'total_score': confidence * position_score
                 })
+                print(f" ✅ Match biển số! (score tổng: {confidence * position_score:.2%})")
+            else:
+                print(" → Không match format (nhưng có thể là prefix/suffix)")
         
         if license_plate_candidates:
+            # Chọn candidate có điểm cao nhất
             best = max(license_plate_candidates, key=lambda x: x['total_score'])
+            print(f"  ✅ Chọn: {best['text']}")
             return best['text']
         
-        # Thử ghép text
+        print(f"  ℹ️  Không tìm text match biển số, thử ghép...")
+        
+        # Thử ghép các text gần nhau lại
         plate_prefixes = []
         plate_suffixes = []
+        
         for (bbox, text, conf) in results:
             text_clean = text.strip().upper()
-            if re.match(r'^[A-Z]?\d{2,3}[A-Z]{0,2}$', text_clean) or re.match(r'^\d{2,3}[A-Z]{1,2}$', text_clean):
+            
+            if len(text_clean) == 0:
+                continue
+            
+            # Clean text: loại bỏ dấu gạch ngang, khoảng trắng để check pattern
+            text_for_pattern = re.sub(r'[\s\-]', '', text_clean)
+            
+            # Đơn giản hóa logic:
+            # Prefix: text có chữ + có số + độ dài 2-5 (ví dụ: 62-M1, 60C, 30A, T61)
+            has_letter = any(c.isalpha() for c in text_for_pattern)
+            has_digit = any(c.isdigit() for c in text_for_pattern)
+            
+            if has_letter and has_digit and 2 <= len(text_for_pattern) <= 5:
+                # Đây là prefix
                 y_center = sum(pt[1] for pt in bbox) / len(bbox)
-                plate_prefixes.append((text_clean, y_center))
-            elif re.match(r'^\d{3,6}(\.\d{1,2})?$', text_clean):
+                plate_prefixes.append((bbox, text_clean, conf, y_center))
+                print(f"  📌 Prefix candidate: '{text_clean}' (clean: '{text_for_pattern}')")
+            # Phần sau: chỉ có số (ví dụ: 1679, 939, 939.98, 555.55)
+            elif has_digit and not has_letter and 2 <= len(text_for_pattern) <= 6:
                 y_center = sum(pt[1] for pt in bbox) / len(bbox)
-                plate_suffixes.append((text_clean, y_center))
+                plate_suffixes.append((bbox, text_clean, conf, y_center))
+                print(f"  📌 Suffix candidate: '{text_clean}' (clean: '{text_for_pattern}')")
         
-        for text1, y1 in plate_prefixes:
-            for text2, y2 in plate_suffixes:
-                if abs(y1 - y2) < 50:
+        # Thử ghép prefix và suffix gần nhau
+        print(f"  🔍 Bắt đầu ghép: {len(plate_prefixes)} prefixes × {len(plate_suffixes)} suffixes")
+        try:
+            for (bbox1, text1, conf1, y1) in plate_prefixes:
+                for (bbox2, text2, conf2, y2) in plate_suffixes:
                     combined = f"{text1} {text2}".upper().strip()
-                    if is_vietnam_license_plate(combined):
+                    # Clean combined text trước khi check (loại tất cả ký tự đặc biệt)
+                    combined_clean = re.sub(r'[\s\-\.\·]', '', combined)
+                    print(f"  🔄 Thử ghép: '{text1}' + '{text2}' → '{combined_clean}'")
+                    if is_vietnam_license_plate(combined_clean):
+                        print(f"  ✅ Ghép thành công: '{combined}'")
                         return combined
+                    else:
+                        print(f"     → Không match format")
+        except Exception as e:
+            print(f"  ❌ Lỗi ghép: {e}")
+            import traceback
+            traceback.print_exc()
         
+        # Nếu không ghép được, thử tất cả các cặp
+        for (bbox1, text1, conf1) in [(b, t, c) for b, t, c, y in plate_prefixes]:
+            for (bbox2, text2, conf2) in [(b, t, c) for b, t, c, y in plate_suffixes]:
+                combined = f"{text1} {text2}".upper().strip()
+                # Clean combined text trước khi check (loại tất cả ký tự đặc biệt)
+                combined_clean = re.sub(r'[\s\-\.\·]', '', combined)
+                if is_vietnam_license_plate(combined_clean):
+                    print(f"  ✅ Ghép (all pairs): '{text1}' + '{text2}' = '{combined}'")
+                    return combined
+        
+        print(f"  ❌ Không ghép được")
         return None
     except Exception as e:
-        print(f"⚠️  Lỗi EasyOCR: {e}")
+        print(f"  ❌ Lỗi EasyOCR: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # ========== DTK LPR SDK INTEGRATION ==========

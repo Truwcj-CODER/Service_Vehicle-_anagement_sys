@@ -764,7 +764,7 @@ def main():
             image_path = os.path.join(script_dir, image_path)
     else:
         # Mặc định dùng bien-so-xe-tai.jpg
-        image_path = os.path.join(script_dir, "bien-so-xe-tai.jpg")
+        image_path = os.path.join(script_dir, "bien-so.jpg")
         # Nếu không có, thử bien_so.webp
         if not os.path.exists(image_path):
             image_path = os.path.join(script_dir, "bien_so.webp")
