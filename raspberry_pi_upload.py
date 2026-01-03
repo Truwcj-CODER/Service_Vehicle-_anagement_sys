@@ -3,7 +3,18 @@ import base64
 from datetime import datetime
 import os
 import sys
+
+# ========== DISABLE GUI & OPTIMIZE FOR RASPBERRY PI ==========
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Disable GPU (Pi không có GPU)
+os.environ['DISABLE_MODEL_SOURCE_CHECK'] = 'True'  # Tránh check model online
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'  # Disable Qt GUI (headless mode)
+os.environ['OPENBLAS_NUM_THREADS'] = '2'  # Giới hạn BLAS threads
+os.environ['OMP_NUM_THREADS'] = '2'  # Giới hạn OpenMP threads
+os.environ['MKL_NUM_THREADS'] = '2'  # Giới hạn MKL threads
+
 import cv2
+cv2.setNumThreads(2)  # Giới hạn CV2 threads
+
 import time
 import serial
 import threading
@@ -441,7 +452,7 @@ def detect_license_plate_with_easyocr(img):
                 plate_prefixes.append((bbox, text_clean, conf, y_center))
                 print(f"  📌 Prefix candidate: '{text_clean}' (clean: '{text_for_pattern}')")
             # Phần sau: chỉ có số (ví dụ: 1679, 939, 939.98, 555.55)
-            elif has_digit and not has_letter and 2 <= len(text_for_pattern) <= 6:
+            elif has_digit and not has_letter and 2 <= len(text_for_pattern) <= 6:  
                 y_center = sum(pt[1] for pt in bbox) / len(bbox)
                 plate_suffixes.append((bbox, text_clean, conf, y_center))
                 print(f"  📌 Suffix candidate: '{text_clean}' (clean: '{text_for_pattern}')")
@@ -1063,34 +1074,18 @@ def main():
         last_trigger_time = time.time()
         
         while True:
-            # Main loop: Hiển thị camera
+            # Main loop: Đọc camera (không hiển thị - headless mode)
             ret, frame = cap.read()
             if ret:
                 with frame_lock:
                     latest_frame = frame.copy()
                 
-                display = frame.copy()
-                
-                # Vẽ khung chữ nhật mô phỏng vùng nhận dạng
-                h, w = display.shape[:2]
-                cv2.rectangle(display, (int(w*0.15), int(h*0.2)), 
-                             (int(w*0.85), int(h*0.8)), (0, 255, 255), 2)
-                
-                # Hiển thị trạng thái
+                # GUI Display disabled for Raspberry Pi optimization
+                # Chỉ in log ra console thay vì hiển thị camera
                 if scan_trigger:
                     elapsed = time.time() - scan_start_time
-                    cv2.putText(display, f"SCANNING... ({elapsed:.1f}s)", (50, 50), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                    cv2.putText(display, f"Weight: {current_weight:.3f} kg", (50, 90), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                else:
-                    time_until_next = 5 - (time.time() - last_trigger_time)
-                    if time_until_next < 0:
-                        time_until_next = 0
-                    cv2.putText(display, f"READY - Next trigger in {time_until_next:.1f}s...", (50, 50), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                
-                cv2.imshow("Smart Scale - License Plate Recognition", display)
+                    if int(elapsed) % 2 == 0:  # In mỗi 2 giây
+                        print(f"  ⏱️  Quét: {elapsed:.1f}s, Cân: {current_weight:.3f}kg", end="\r")
             
             # AUTO TRIGGER LOGIC: Mỗi 5 giây tự động trigger nếu không đang scan
             current_time = time.time()
@@ -1104,10 +1099,9 @@ def main():
                 scan_trigger = True
                 last_trigger_time = current_time
             
-            # Xử lý phím bấm
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
+            # Xử lý phím bấm (nhưng không hiển thị window)
+            # Có thể dùng Ctrl+C để thoát
+            time.sleep(0.1)
     
     except KeyboardInterrupt:
         print("\n⚠️  Người dùng dừng chương trình")
