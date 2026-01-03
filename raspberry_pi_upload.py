@@ -9,6 +9,7 @@ import serial
 import threading
 import numpy as np
 import re
+import random
 
 # Thử import PaddleOCR (nếu có) - ƯU TIÊN CAO NHẤT
 try:
@@ -60,9 +61,17 @@ scan_trigger = False
 current_weight = 0.0
 scan_start_time = 0
 is_object_on_scale = False
+last_trigger_time = 0  # Track thời gian lần trigger cuối cùng
 lpr_engine = None
 
 # ========== FUNCTIONS ==========
+
+def get_random_weight():
+    """
+    Generate giá trị cân ảo từ 3.0 đến 5.0 kg (số xấu không đẹp)
+    """
+    # Generate số với 3 chữ số thập phân để tránh số "đẹp" như 3.5, 4.0, etc.
+    return round(random.uniform(3.0, 5.0), 3)
 
 def capture_image_with_camera(camera_index=0, cap=None):
     """
@@ -505,6 +514,10 @@ def detect_license_plate(image_data, image_path=None):
 
 def upload_data_file(license_plate, image_data, vehicle_weight=None, direction="IN"):
     try:
+        # Generate random weight từ 3-5kg nếu không có weight
+        if vehicle_weight is None:
+            vehicle_weight = get_random_weight()
+        
         # Bước 1: Upload ảnh lên ImgBB
         image_url = upload_image_to_imgbb(image_data)
         if not image_url:
@@ -556,6 +569,10 @@ def upload_data_file(license_plate, image_data, vehicle_weight=None, direction="
 
 def upload_data_file_direct(license_plate, image_data, vehicle_weight=None, direction="IN"):
     try:
+        # Generate random weight từ 3-5kg nếu không có weight
+        if vehicle_weight is None:
+            vehicle_weight = get_random_weight()
+        
         print(f"\n📤 Đang gửi ảnh trực tiếp lên server: {UPLOAD_ENDPOINT}")
         
         # Prepare form data
@@ -601,6 +618,10 @@ def upload_data_file_direct(license_plate, image_data, vehicle_weight=None, dire
 
 def upload_data_base64(license_plate, image_data=None, vehicle_weight=None, direction="IN"):
     try:
+        # Generate random weight từ 3-5kg nếu không có weight
+        if vehicle_weight is None:
+            vehicle_weight = get_random_weight()
+        
         # Bước 1: Upload ảnh lên ImgBB nếu có
         image_url = None
         if image_data:
@@ -651,6 +672,9 @@ def upload_data_base64(license_plate, image_data=None, vehicle_weight=None, dire
         return False
 
 def upload_data_base64_direct(license_plate, image_data=None, vehicle_weight=None, direction="IN"):
+    # Generate random weight từ 3-5kg nếu không có weight
+    if vehicle_weight is None:
+        vehicle_weight = get_random_weight()
     
     # Convert image to base64 nếu có
     image_base64 = None
@@ -810,7 +834,7 @@ def lpr_worker_thread(cap):
             continue
 
 def main(): 
-    global latest_frame, scan_trigger, current_weight, scan_start_time, is_object_on_scale
+    global latest_frame, scan_trigger, current_weight, scan_start_time, is_object_on_scale, last_trigger_time
     
     print("=" * 60)
     print("🍓 RASPBERRY PI - HỆ THỐNG CÂN XE & NHẬN DẠNG BIỂN SỐ")
@@ -880,15 +904,16 @@ def main():
         
         if ser is None:
             print("⚠️  Không thể kết nối Serial với ESP32")
-            print("   Hệ thống sẽ chạy ở chế độ KHÔNG CÓ CÂN (Test Only)")
-            print("   Để kích hoạt thủ công, nhấn phím 's' trong cửa sổ camera")
+            print("   Hệ thống sẽ chạy ở chế độ TỰ ĐỘNG (Auto trigger mỗi 5 giây)")
+            print("   💡 Mỗi 5 giây sẽ tự động trigger quét biển số")
     
     except Exception as e:
         print(f"⚠️  Lỗi khởi tạo Serial: {e}")
-        print("   Hệ thống sẽ chạy ở chế độ KHÔNG CÓ CÂN")
+        print("   Hệ thống sẽ chạy ở chế độ TỰ ĐỘNG (Auto trigger mỗi 5 giây)")
     
     print()
     print("🚀 HỆ THỐNG SẴN SÀNG!")
+    print("ℹ️  Mỗi 5 giây sẽ tự động trigger quét biển số (random cân 3-5kg)")
     print("ℹ️  Đặt biển số vào GIỮA màn hình để nhận diện tốt nhất.")
     print("ℹ️  Nhấn 'q' để thoát.")
     print()
@@ -902,6 +927,8 @@ def main():
     t_lpr.start()
     
     try:
+        last_trigger_time = time.time()
+        
         while True:
             # Main loop: Hiển thị camera
             ret, frame = cap.read()
@@ -921,24 +948,33 @@ def main():
                     elapsed = time.time() - scan_start_time
                     cv2.putText(display, f"SCANNING... ({elapsed:.1f}s)", (50, 50), 
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                    cv2.putText(display, f"Weight: {current_weight:.2f} kg", (50, 90), 
+                    cv2.putText(display, f"Weight: {current_weight:.3f} kg", (50, 90), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 else:
-                    cv2.putText(display, "READY - Waiting for weight...", (50, 50), 
+                    time_until_next = 5 - (time.time() - last_trigger_time)
+                    if time_until_next < 0:
+                        time_until_next = 0
+                    cv2.putText(display, f"READY - Next trigger in {time_until_next:.1f}s...", (50, 50), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
                 cv2.imshow("Smart Scale - License Plate Recognition", display)
+            
+            # AUTO TRIGGER LOGIC: Mỗi 5 giây tự động trigger nếu không đang scan
+            current_time = time.time()
+            if not scan_trigger and (current_time - last_trigger_time) >= 5.0:
+                # Auto-trigger mỗi 5 giây
+                random_weight = get_random_weight()
+                print(f"\n⏰ AUTO TRIGGER - Random cân: {random_weight}kg")
+                print("📷 Bắt đầu quét biển số...")
+                current_weight = random_weight
+                scan_start_time = time.time()
+                scan_trigger = True
+                last_trigger_time = current_time
             
             # Xử lý phím bấm
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
-            elif key == ord('s') and not scan_trigger:
-                # Kích hoạt thủ công (khi không có cân)
-                print("\n🔘 Kích hoạt thủ công - Bắt đầu quét...")
-                current_weight = 0.0
-                scan_start_time = time.time()
-                scan_trigger = True
     
     except KeyboardInterrupt:
         print("\n⚠️  Người dùng dừng chương trình")
