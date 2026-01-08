@@ -38,7 +38,7 @@ except ImportError:
 
 # ========== CẤU HÌNH ==========
 # Thay đổi IP này thành IP của server của bạn
-SERVER_URL = "http://192.168.100.57:5000"  
+SERVER_URL = "http://10.25.84.229:5000"  
 API_KEY = "raspberry_pi_key_123"
 DEVICE_ID = "RASPBERRY_PI_001"
 
